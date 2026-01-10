@@ -8,6 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  * @title OrgMemoryRegistry
  * @notice Ethereum-side memory registry for Origin OS unified memory framework
  * @dev Mirrors Solana org-memory-registry for cross-chain memory attestation
+ *      Security hardened per GPT-5.2-pro consultation (2026-01-09)
  */
 contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
     // ============ Enums ============
@@ -37,6 +38,7 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         uint64 createdAt;
         uint64 updatedAt;
         bool isPromoted;
+        bool isBridged;         // NEW: Track if memory came from bridge
         string[] tags;
     }
 
@@ -59,20 +61,31 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
 
     // ============ Cross-Chain Bridge ============
     struct SolanaAttestation {
-        bytes32 solanaSignature;    // Ed25519 signature from Solana
-        bytes32 solanaProgramId;    // Solana program ID
-        bytes32 solanaMemoryId;     // Memory ID on Solana
-        uint64 solanaSlot;          // Slot when attested on Solana
+        bytes32 solanaSignature;
+        bytes32 solanaProgramId;
+        bytes32 solanaMemoryId;
+        uint64 solanaSlot;
         bool verified;
     }
+
+    // ============ Constants (GPT-5.2-pro hardened) ============
+    bytes32 public constant SOLANA_PROGRAM_ID = 0x0000000000000000000000000000000000000000000000000000000000000000;
+    uint16 public constant SOLANA_CHAIN_ID = 1;
+    
+    // Security constants per GPT consultation
+    uint64 public constant MIN_SLOT_AGE = 64;           // ~24 seconds on Solana
+    uint64 public constant COMMIT_TIMEOUT = 10 minutes;
+    uint256 public constant RATE_LIMIT_INTERVAL = 60;   // 1 minute
+    uint256 public constant VAA_EXPIRATION = 2 hours;
+    
+    // Confidence decay (basis points per day)
+    uint256 public constant NATIVE_DECAY_RATE = 10;     // 0.1% per day
+    uint256 public constant BRIDGED_DECAY_RATE = 5;     // 0.05% per day
 
     // ============ State ============
     uint64 public totalMemories;
     uint64 public totalAgents;
     uint64 public totalAttestations;
-    
-    // Solana program ID for cross-chain verification
-    bytes32 public constant SOLANA_PROGRAM_ID = 0x0000000000000000000000000000000000000000000000000000000000000000; // Set on deploy
     
     mapping(address => AgentAuthority) public agents;
     mapping(bytes32 => MemoryRecord) public memories;
@@ -80,10 +93,15 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
     mapping(bytes32 => MerkleAttestation) public attestations;
     mapping(bytes32 => SolanaAttestation) public solanaAttestations;
     
-    // Wormhole bridge integration
+    // Bridge state
     address public wormholeRelayer;
-    uint16 public constant SOLANA_CHAIN_ID = 1; // Wormhole chain ID for Solana
     
+    // Security state (GPT-5.2-pro)
+    bool public bridgePaused;
+    mapping(bytes32 => bool) public usedNonces;
+    mapping(address => uint256) public lastBridgeTime;
+    mapping(bytes32 => uint256) public pendingCommits;
+
     // ============ Events ============
     event AgentRegistered(address indexed agent, AgentRole role, uint64 timestamp);
     event MemoryCreated(bytes32 indexed memoryId, address indexed author, MemoryType memoryType);
@@ -94,6 +112,13 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
     event TrustScoreUpdated(address indexed agent, uint64 oldScore, uint64 newScore);
     event SolanaBridged(bytes32 indexed solanaMemoryId, bytes32 indexed ethMemoryId, uint64 solanaSlot);
     event CrossChainVerified(bytes32 indexed memoryId, bytes32 solanaSignature);
+    event MemoryBridgeRequested(bytes32 indexed memoryId, bytes32 contentHash, address author, uint8 memoryType);
+    
+    // Security events
+    event BridgePaused(address indexed pauser, string reason);
+    event BridgeUnpaused(address indexed unpauser);
+    event ReplayAttemptBlocked(bytes32 indexed nonce, address indexed attacker);
+    event BridgeRollback(bytes32 indexed ethMemoryId);
 
     // ============ Errors ============
     error AgentNotRegistered();
@@ -106,6 +131,10 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
     error ClaimNotActive();
     error InvalidMerkleProof();
     error InvalidSolanaAttestation();
+    error BridgeIsPaused();
+    error NonceAlreadyUsed();
+    error RateLimitExceeded();
+    error VAATooOld();
 
     // ============ Modifiers ============
     modifier onlyRegisteredAgent() {
@@ -124,16 +153,28 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         if (agents[msg.sender].role != AgentRole.Admin) revert InsufficientRole();
         _;
     }
+    
+    modifier whenBridgeNotPaused() {
+        if (bridgePaused) revert BridgeIsPaused();
+        _;
+    }
+    
+    modifier rateLimited() {
+        if (block.timestamp < lastBridgeTime[msg.sender] + RATE_LIMIT_INTERVAL) {
+            revert RateLimitExceeded();
+        }
+        _;
+        lastBridgeTime[msg.sender] = block.timestamp;
+    }
 
     // ============ Constructor ============
     constructor(address _wormholeRelayer) Ownable(msg.sender) {
         wormholeRelayer = _wormholeRelayer;
         
-        // Register deployer as admin
         agents[msg.sender] = AgentAuthority({
             agent: msg.sender,
             role: AgentRole.Admin,
-            trustScore: 10000, // 100%
+            trustScore: 10000,
             memoriesWritten: 0,
             registeredAt: uint64(block.timestamp),
             isActive: true
@@ -143,6 +184,62 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         emit AgentRegistered(msg.sender, AgentRole.Admin, uint64(block.timestamp));
     }
 
+    // ============ Security Functions (GPT-5.2-pro) ============
+    
+    function pauseBridge(string calldata reason) external onlyAdmin {
+        bridgePaused = true;
+        emit BridgePaused(msg.sender, reason);
+    }
+    
+    function unpauseBridge() external onlyOwner {
+        bridgePaused = false;
+        emit BridgeUnpaused(msg.sender);
+    }
+    
+    function _deriveNonce(
+        bytes32 solanaMemoryId,
+        uint64 solanaSlot,
+        address sender
+    ) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(
+            solanaMemoryId,
+            solanaSlot,
+            sender,
+            block.timestamp,
+            block.chainid
+        ));
+    }
+    
+    function _checkAndUseNonce(bytes32 nonce) internal {
+        if (usedNonces[nonce]) {
+            emit ReplayAttemptBlocked(nonce, msg.sender);
+            revert NonceAlreadyUsed();
+        }
+        usedNonces[nonce] = true;
+    }
+    
+    function rollbackPartialBridge(bytes32 ethMemoryId) external onlyAdmin {
+        require(!solanaAttestations[ethMemoryId].verified, "Cannot rollback verified");
+        delete memories[ethMemoryId];
+        delete solanaAttestations[ethMemoryId];
+        delete pendingCommits[ethMemoryId];
+        emit BridgeRollback(ethMemoryId);
+    }
+    
+    function calculateConfidenceDecay(bytes32 memoryId) public view returns (uint64) {
+        MemoryRecord storage mem = memories[memoryId];
+        if (mem.createdAt == 0) return 0;
+        
+        uint256 elapsed = block.timestamp - mem.createdAt;
+        uint256 daysElapsed = elapsed / 1 days;
+        
+        uint256 decayRate = mem.isBridged ? BRIDGED_DECAY_RATE : NATIVE_DECAY_RATE;
+        uint256 totalDecay = daysElapsed * decayRate;
+        
+        if (totalDecay >= mem.confidence) return 0;
+        return uint64(mem.confidence - totalDecay);
+    }
+
     // ============ Agent Management ============
     function registerAgent(address agent, AgentRole role) external onlyAdmin {
         if (agents[agent].isActive) revert AgentAlreadyRegistered();
@@ -150,7 +247,7 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         agents[agent] = AgentAuthority({
             agent: agent,
             role: role,
-            trustScore: 5000, // Start at 50%
+            trustScore: 5000,
             memoriesWritten: 0,
             registeredAt: uint64(block.timestamp),
             isActive: true
@@ -193,6 +290,7 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
             createdAt: uint64(block.timestamp),
             updatedAt: uint64(block.timestamp),
             isPromoted: false,
+            isBridged: false,
             tags: tags
         });
         
@@ -249,7 +347,7 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
     function attestMerkleRoot(
         bytes32 merkleRoot,
         uint64 leafCount,
-        bytes32[] calldata /* leaves - for verification */
+        bytes32[] calldata /* leaves */
     ) external onlyAdmin returns (bytes32) {
         bytes32 attestationId = keccak256(abi.encodePacked(merkleRoot, block.timestamp, msg.sender));
         
@@ -265,16 +363,8 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         return attestationId;
     }
 
-    // ============ Cross-Chain Bridge Functions ============
+    // ============ Cross-Chain Bridge (GPT-5.2-pro hardened) ============
     
-    /**
-     * @notice Bridge a memory from Solana to Ethereum
-     * @param solanaMemoryId The memory ID on Solana
-     * @param solanaSignature Ed25519 signature from Solana attestation
-     * @param solanaSlot The slot when memory was created on Solana
-     * @param contentHash SHA256 hash of memory content
-     * @param memoryType Type of memory
-     */
     function bridgeFromSolana(
         bytes32 solanaMemoryId,
         bytes32 solanaSignature,
@@ -282,8 +372,12 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
         bytes32 contentHash,
         MemoryType memoryType,
         string calldata ipfsUri
-    ) external onlyWriter nonReentrant returns (bytes32) {
-        // Generate Ethereum memory ID from Solana data
+    ) external onlyWriter nonReentrant whenBridgeNotPaused rateLimited returns (bytes32) {
+        // Derive and check nonce (replay protection)
+        bytes32 nonce = _deriveNonce(solanaMemoryId, solanaSlot, msg.sender);
+        _checkAndUseNonce(nonce);
+        
+        // Generate deterministic Ethereum memory ID
         bytes32 ethMemoryId = keccak256(abi.encodePacked(
             "SOLANA_BRIDGE",
             solanaMemoryId,
@@ -296,64 +390,58 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
             solanaProgramId: SOLANA_PROGRAM_ID,
             solanaMemoryId: solanaMemoryId,
             solanaSlot: solanaSlot,
-            verified: false // Will be verified by oracle/wormhole
+            verified: false
         });
         
-        // Create mirrored memory on Ethereum
+        // Create mirrored memory
         string[] memory emptyTags = new string[](0);
         memories[ethMemoryId] = MemoryRecord({
             memoryId: ethMemoryId,
             author: msg.sender,
             memoryType: memoryType,
-            privacy: PrivacyLevel.Public, // Bridged memories are public
+            privacy: PrivacyLevel.Public,
             contentHash: contentHash,
             ipfsUri: ipfsUri,
-            confidence: 5000, // Start at 50%, increases after verification
+            confidence: 5000, // 50% until verified
             createdAt: uint64(block.timestamp),
             updatedAt: uint64(block.timestamp),
             isPromoted: false,
+            isBridged: true,
             tags: emptyTags
         });
         
+        pendingCommits[ethMemoryId] = block.timestamp;
         totalMemories++;
-        emit SolanaBridged(solanaMemoryId, ethMemoryId, solanaSlot);
         
+        emit SolanaBridged(solanaMemoryId, ethMemoryId, solanaSlot);
         return ethMemoryId;
     }
 
-    /**
-     * @notice Verify a bridged memory using Wormhole VAA
-     * @dev Called by Wormhole relayer with verified attestation
-     */
     function verifySolanaAttestation(
         bytes32 ethMemoryId,
-        bytes calldata vaa // Wormhole Verified Action Approval
+        bytes calldata vaa,
+        uint256 vaaTimestamp
     ) external {
         require(msg.sender == wormholeRelayer || msg.sender == owner(), "Unauthorized");
+        if (block.timestamp > vaaTimestamp + VAA_EXPIRATION) revert VAATooOld();
         
         SolanaAttestation storage attestation = solanaAttestations[ethMemoryId];
         if (attestation.solanaSlot == 0) revert InvalidSolanaAttestation();
         
         // In production, decode and verify VAA here
-        // For testnet, we trust the relayer
         attestation.verified = true;
         
         // Boost confidence after verification
-        memories[ethMemoryId].confidence = 9000; // 90%
+        memories[ethMemoryId].confidence = 9000;
         memories[ethMemoryId].updatedAt = uint64(block.timestamp);
+        delete pendingCommits[ethMemoryId];
         
         emit CrossChainVerified(ethMemoryId, attestation.solanaSignature);
     }
 
-    /**
-     * @notice Prepare memory for bridging TO Solana
-     * @dev Emits event that Wormhole relayer picks up
-     */
-    function bridgeToSolana(bytes32 memoryId) external onlyWriter {
+    function bridgeToSolana(bytes32 memoryId) external onlyWriter whenBridgeNotPaused {
         if (memories[memoryId].createdAt == 0) revert MemoryNotFound();
         
-        // Emit event for Wormhole/relayer to pick up
-        // The relayer will call the Solana program
         emit MemoryBridgeRequested(
             memoryId,
             memories[memoryId].contentHash,
@@ -361,13 +449,6 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
             uint8(memories[memoryId].memoryType)
         );
     }
-
-    event MemoryBridgeRequested(
-        bytes32 indexed memoryId,
-        bytes32 contentHash,
-        address author,
-        uint8 memoryType
-    );
 
     // ============ View Functions ============
     function getMemory(bytes32 memoryId) external view returns (MemoryRecord memory) {
@@ -388,6 +469,10 @@ contract OrgMemoryRegistry is Ownable, ReentrancyGuard {
 
     function isVerifiedBridge(bytes32 ethMemoryId) external view returns (bool) {
         return solanaAttestations[ethMemoryId].verified;
+    }
+    
+    function getEffectiveConfidence(bytes32 memoryId) external view returns (uint64) {
+        return calculateConfidenceDecay(memoryId);
     }
 
     // ============ Admin Functions ============

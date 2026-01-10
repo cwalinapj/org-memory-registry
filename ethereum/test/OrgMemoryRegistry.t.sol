@@ -65,6 +65,9 @@ contract OrgMemoryRegistryTest is Test {
     function test_BridgeFromSolana() public {
         registry.registerAgent(writer, OrgMemoryRegistry.AgentRole.Writer);
         
+        // Advance time to avoid rate limiting
+        vm.warp(block.timestamp + 120);
+        
         vm.startPrank(writer);
         
         bytes32 solanaMemoryId = keccak256("solana-memory-123");
@@ -97,6 +100,9 @@ contract OrgMemoryRegistryTest is Test {
     function test_VerifySolanaAttestation() public {
         registry.registerAgent(writer, OrgMemoryRegistry.AgentRole.Writer);
         
+        // Advance time to avoid rate limiting
+        vm.warp(block.timestamp + 120);
+        
         vm.prank(writer);
         bytes32 ethMemoryId = registry.bridgeFromSolana(
             keccak256("solana-mem"),
@@ -108,7 +114,7 @@ contract OrgMemoryRegistryTest is Test {
         );
         
         // Verify as owner (simulating wormhole relayer)
-        registry.verifySolanaAttestation(ethMemoryId, "");
+        registry.verifySolanaAttestation(ethMemoryId, "", block.timestamp);
         
         // Check verification
         assertTrue(registry.isVerifiedBridge(ethMemoryId));

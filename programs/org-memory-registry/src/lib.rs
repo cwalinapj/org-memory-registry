@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::hash::hash;
 
-declare_id!("memRYfSiJ4TgVZMbN3BpZvmHEp7kVLoaLPEJzjdFVWL");
+
+declare_id!("EduJX2mC335nh3uQ6TarYT5GaMumA2RBethG4CEuyh62");
 
 /// Origin OS Memory Registry
 /// 
@@ -688,7 +688,7 @@ pub struct AttestMerkleRoot<'info> {
         init,
         payer = attester,
         space = MerkleAttestation::SIZE,
-        seeds = [b"attestation", &registry.memory_count.to_le_bytes()],
+        seeds = [b"attestation", registry.memory_count.to_le_bytes().as_ref()],
         bump
     )]
     pub attestation: Account<'info, MerkleAttestation>,

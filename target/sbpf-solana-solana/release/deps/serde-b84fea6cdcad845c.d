@@ -1,0 +1,14 @@
+/Users/root1/org-memory-registry/target/sbpf-solana-solana/release/deps/libserde-b84fea6cdcad845c.rmeta: /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /Users/root1/org-memory-registry/target/sbpf-solana-solana/release/build/serde-9933e1ed5d84c542/out/private.rs
+
+/Users/root1/org-memory-registry/target/sbpf-solana-solana/release/deps/libserde-b84fea6cdcad845c.rlib: /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /Users/root1/org-memory-registry/target/sbpf-solana-solana/release/build/serde-9933e1ed5d84c542/out/private.rs
+
+/Users/root1/org-memory-registry/target/sbpf-solana-solana/release/deps/serde-b84fea6cdcad845c.d: /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs /Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs /Users/root1/org-memory-registry/target/sbpf-solana-solana/release/build/serde-9933e1ed5d84c542/out/private.rs
+
+/Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/lib.rs:
+/Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/integer128.rs:
+/Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/mod.rs:
+/Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/de.rs:
+/Users/root1/.cargo/registry/src/index.crates.io-6f17d22bba15001f/serde-1.0.228/src/private/ser.rs:
+/Users/root1/org-memory-registry/target/sbpf-solana-solana/release/build/serde-9933e1ed5d84c542/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/root1/org-memory-registry/target/sbpf-solana-solana/release/build/serde-9933e1ed5d84c542/out

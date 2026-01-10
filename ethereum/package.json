@@ -1,0 +1,36 @@
+{
+  "name": "@origin-os/memory-bridge-ethereum",
+  "version": "0.1.0",
+  "description": "Ethereum bridge for Origin OS Memory Registry - Wormhole cross-chain integration",
+  "main": "index.js",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:local": "hardhat run scripts/deploy.js --network hardhat",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "deploy:goerli": "hardhat run scripts/deploy.js --network goerli",
+    "verify": "hardhat verify --network sepolia",
+    "clean": "hardhat clean",
+    "node": "hardhat node"
+  },
+  "keywords": [
+    "origin-os",
+    "memory",
+    "bridge",
+    "wormhole",
+    "solana",
+    "ethereum",
+    "cross-chain"
+  ],
+  "author": "Origin OS <paul@origin-os.com>",
+  "license": "MIT",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.19.0",
+    "dotenv": "^16.3.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cwalinapj/org-memory-registry.git"
+  }
+}

@@ -1,16 +1,16 @@
 use anchor_lang::prelude::*;
-
+use anchor_lang::solana_program::hash::hash;
 
 declare_id!("EduJX2mC335nh3uQ6TarYT5GaMumA2RBethG4CEuyh62");
 
 /// Origin OS Memory Registry
-/// 
+///
 /// Unified memory substrate for AI agents on Solana.
 /// Implements three-layer memory architecture:
 /// - Working Memory (session-scoped, off-chain)
 /// - Episodic Memory (events, append-only)
 /// - Semantic Memory (facts, validated/promoted)
-/// 
+///
 /// Integrates with Origin OS Protocol:
 /// - session_escrow for CDN attestation
 /// - staking_rewards for agent trust scores
@@ -21,7 +21,10 @@ pub mod org_memory_registry {
     use super::*;
 
     /// Initialize the memory registry with admin authority
-    pub fn initialize_registry(ctx: Context<InitializeRegistry>, config: RegistryConfig) -> Result<()> {
+    pub fn initialize_registry(
+        ctx: Context<InitializeRegistry>,
+        config: RegistryConfig,
+    ) -> Result<()> {
         let registry = &mut ctx.accounts.registry;
         registry.admin = ctx.accounts.admin.key();
         registry.schema_version = 1;
@@ -46,7 +49,22 @@ pub mod org_memory_registry {
         ctx: Context<RegisterAgent>,
         agent_id: [u8; 16],
         role: AgentRole,
+        agent_repo_url: String,
+        registry_reference_url: String,
     ) -> Result<()> {
+        require!(
+            !agent_repo_url.trim().is_empty(),
+            MemoryError::InvalidAgentRepoUrl
+        );
+        require!(
+            agent_repo_url.len() <= MAX_REPO_URL_LENGTH,
+            MemoryError::RepoUrlTooLong
+        );
+        require!(
+            is_registry_repo_link(&registry_reference_url),
+            MemoryError::MissingRegistryRepoLink
+        );
+
         let agent = &mut ctx.accounts.agent_authority;
         agent.agent_id = agent_id;
         agent.pubkey = ctx.accounts.agent_signer.key();
@@ -55,15 +73,22 @@ pub mod org_memory_registry {
         agent.memory_count = 0;
         agent.created_at = Clock::get()?.unix_timestamp;
         agent.last_active = agent.created_at;
+        agent.repo_url = agent_repo_url.clone();
+        agent.registry_reference_url = registry_reference_url.clone();
         agent.bump = ctx.bumps.agent_authority;
 
         let registry = &mut ctx.accounts.registry;
-        registry.agent_count += 1;
+        registry.agent_count = registry
+            .agent_count
+            .checked_add(1)
+            .ok_or(MemoryError::CounterOverflow)?;
 
         emit!(AgentRegistered {
             agent_id,
             pubkey: agent.pubkey,
             role,
+            repo_url: agent_repo_url,
+            registry_reference_url,
         });
 
         Ok(())
@@ -85,6 +110,20 @@ pub mod org_memory_registry {
             MemoryError::OnlyEpisodicAllowed
         );
         require!(tags.len() <= MAX_TAGS, MemoryError::TooManyTags);
+        let default_ttl = ctx.accounts.registry.config.default_ttl;
+        let ttl_to_set = match ttl {
+            Some(explicit_ttl) => {
+                require!(explicit_ttl > 0, MemoryError::InvalidTtl);
+                Some(explicit_ttl)
+            }
+            None => {
+                if default_ttl > 0 {
+                    Some(default_ttl)
+                } else {
+                    None
+                }
+            }
+        };
 
         let memory = &mut ctx.accounts.memory_record;
         let agent = &mut ctx.accounts.agent_authority;
@@ -99,19 +138,26 @@ pub mod org_memory_registry {
         memory.memory_type = memory_type;
         memory.subject = subject;
         memory.claims_count = 0;
+        memory.max_claims = ctx.accounts.registry.config.max_claims_per_memory;
         memory.privacy = privacy;
-        memory.ttl = ttl;
+        memory.ttl = ttl_to_set;
         memory.tags = tags;
         memory.links_hash = links_hash;
         memory.integrity_hash = [0u8; 32];
         memory.is_promoted = false;
         memory.bump = ctx.bumps.memory_record;
 
-        agent.memory_count += 1;
+        agent.memory_count = agent
+            .memory_count
+            .checked_add(1)
+            .ok_or(MemoryError::CounterOverflow)?;
         agent.last_active = clock.unix_timestamp;
 
         let registry = &mut ctx.accounts.registry;
-        registry.memory_count += 1;
+        registry.memory_count = registry
+            .memory_count
+            .checked_add(1)
+            .ok_or(MemoryError::CounterOverflow)?;
 
         emit!(MemoryCreated {
             memory_id,
@@ -137,7 +183,16 @@ pub mod org_memory_registry {
 
         let claim = &mut ctx.accounts.claim_account;
         let memory = &mut ctx.accounts.memory_record;
+        let agent = &mut ctx.accounts.agent_authority;
         let clock = Clock::get()?;
+        require!(
+            !memory.is_expired(clock.unix_timestamp),
+            MemoryError::MemoryExpired
+        );
+        require!(
+            memory.claims_count < memory.max_claims,
+            MemoryError::MaxClaimsExceeded
+        );
 
         claim.memory_id = memory.memory_id;
         claim.claim_index = claim_index;
@@ -150,7 +205,11 @@ pub mod org_memory_registry {
         claim.superseded_by = None;
         claim.bump = ctx.bumps.claim_account;
 
-        memory.claims_count += 1;
+        memory.claims_count = memory
+            .claims_count
+            .checked_add(1)
+            .ok_or(MemoryError::CounterOverflow)?;
+        agent.last_active = clock.unix_timestamp;
 
         // Recompute integrity hash
         let mut hash_input = Vec::new();
@@ -199,10 +258,7 @@ pub mod org_memory_registry {
     }
 
     /// Retract a claim (marks as invalid with reason)
-    pub fn retract_claim(
-        ctx: Context<RetractClaim>,
-        reason_hash: [u8; 32],
-    ) -> Result<()> {
+    pub fn retract_claim(ctx: Context<RetractClaim>, reason_hash: [u8; 32]) -> Result<()> {
         let claim = &mut ctx.accounts.claim_account;
         let agent = &ctx.accounts.agent_authority;
 
@@ -234,17 +290,34 @@ pub mod org_memory_registry {
         let old_claim = &mut ctx.accounts.old_claim;
         let new_claim = &mut ctx.accounts.new_claim;
         let memory = &ctx.accounts.memory_record;
+        let agent = &ctx.accounts.agent_authority;
         let clock = Clock::get()?;
 
         require!(!old_claim.is_retracted, MemoryError::AlreadyRetracted);
+        require!(
+            old_claim.superseded_by.is_none(),
+            MemoryError::AlreadySuperseded
+        );
+        require!(
+            !memory.is_expired(clock.unix_timestamp),
+            MemoryError::MemoryExpired
+        );
+        require!(
+            agent.role == AgentRole::TrustedPublisher || agent.role == AgentRole::Admin,
+            MemoryError::InsufficientPermissions
+        );
         require!(new_confidence <= 10000, MemoryError::InvalidConfidence);
+        let new_claim_index = old_claim
+            .claim_index
+            .checked_add(CLAIM_SUPERSEDE_OFFSET)
+            .ok_or(MemoryError::CounterOverflow)?;
 
         // Mark old claim as superseded
         old_claim.superseded_by = Some(new_claim.key());
 
         // Initialize new claim
         new_claim.memory_id = memory.memory_id;
-        new_claim.claim_index = old_claim.claim_index + 1000; // Offset for superseding claims
+        new_claim.claim_index = new_claim_index;
         new_claim.predicate = old_claim.predicate;
         new_claim.object = new_object;
         new_claim.confidence = new_confidence;
@@ -268,10 +341,7 @@ pub mod org_memory_registry {
         ctx: Context<AttestMerkleRoot>,
         memory_hashes: Vec<[u8; 32]>,
     ) -> Result<()> {
-        require!(
-            !memory_hashes.is_empty(),
-            MemoryError::EmptyMerkleInput
-        );
+        require!(!memory_hashes.is_empty(), MemoryError::EmptyMerkleInput);
         require!(
             memory_hashes.len() <= MAX_MERKLE_LEAVES,
             MemoryError::TooManyMerkleLeaves
@@ -306,12 +376,9 @@ pub mod org_memory_registry {
     }
 
     /// Update agent trust score (called by staking_rewards via CPI)
-    pub fn update_trust_score(
-        ctx: Context<UpdateTrustScore>,
-        new_score: u64,
-    ) -> Result<()> {
+    pub fn update_trust_score(ctx: Context<UpdateTrustScore>, new_score: u64) -> Result<()> {
         let agent = &mut ctx.accounts.agent_authority;
-        
+
         // Only allow score updates from authorized callers
         require!(
             ctx.accounts.caller.key() == ctx.accounts.registry.config.staking_program,
@@ -334,7 +401,7 @@ pub mod org_memory_registry {
         expected_hash: [u8; 32],
     ) -> Result<bool> {
         let memory = &ctx.accounts.memory_record;
-        
+
         let valid = memory.integrity_hash == expected_hash
             && !memory.is_expired(Clock::get()?.unix_timestamp);
 
@@ -391,11 +458,14 @@ pub struct AgentAuthority {
     pub memory_count: u64,
     pub created_at: i64,
     pub last_active: i64,
+    pub repo_url: String,
+    pub registry_reference_url: String,
     pub bump: u8,
 }
 
 impl AgentAuthority {
-    pub const SIZE: usize = 8 + 16 + 32 + 1 + 8 + 8 + 8 + 8 + 1;
+    pub const SIZE: usize =
+        8 + 16 + 32 + 1 + 8 + 8 + 8 + 8 + 4 + MAX_REPO_URL_LENGTH + 4 + MAX_REPO_URL_LENGTH + 1;
 }
 
 #[account]
@@ -409,6 +479,7 @@ pub struct MemoryRecord {
     pub memory_type: MemoryType,
     pub subject: [u8; 32],
     pub claims_count: u16,
+    pub max_claims: u16,
     pub privacy: PrivacyLevel,
     pub ttl: Option<i64>,
     pub tags: Vec<[u8; 32]>,
@@ -419,8 +490,9 @@ pub struct MemoryRecord {
 }
 
 impl MemoryRecord {
-    pub const BASE_SIZE: usize = 8 + 16 + 1 + 32 + 32 + 8 + 8 + 1 + 32 + 2 + 1 + 9 + 4 + 32 + 32 + 1 + 1;
-    
+    pub const BASE_SIZE: usize =
+        8 + 16 + 1 + 32 + 32 + 8 + 8 + 1 + 32 + 2 + 2 + 1 + 9 + 4 + 32 + 32 + 1 + 1;
+
     pub fn size(num_tags: usize) -> usize {
         Self::BASE_SIZE + (num_tags * 32)
     }
@@ -473,17 +545,17 @@ impl MerkleAttestation {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AgentRole {
     #[default]
-    Observer,           // Can read
-    Writer,             // Can write episodic
-    TrustedPublisher,   // Can promote to semantic
-    Admin,              // Full control
+    Observer, // Can read
+    Writer,           // Can write episodic
+    TrustedPublisher, // Can promote to semantic
+    Admin,            // Full control
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryType {
     #[default]
-    Episodic,   // Events, interactions
-    Semantic,   // Facts, validated truths
+    Episodic, // Events, interactions
+    Semantic, // Facts, validated truths
     Fact,
     Preference,
     Plan,
@@ -515,10 +587,10 @@ pub struct InitializeRegistry<'info> {
         bump
     )]
     pub registry: Account<'info, MemoryRegistry>,
-    
+
     #[account(mut)]
     pub admin: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -531,7 +603,7 @@ pub struct RegisterAgent<'info> {
         bump = registry.bump
     )]
     pub registry: Account<'info, MemoryRegistry>,
-    
+
     #[account(
         init,
         payer = payer,
@@ -540,12 +612,12 @@ pub struct RegisterAgent<'info> {
         bump
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
     pub agent_signer: Signer<'info>,
-    
+
     #[account(mut)]
     pub payer: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -558,7 +630,7 @@ pub struct WriteMemory<'info> {
         bump = registry.bump
     )]
     pub registry: Account<'info, MemoryRegistry>,
-    
+
     #[account(
         init,
         payer = payer,
@@ -567,20 +639,23 @@ pub struct WriteMemory<'info> {
         bump
     )]
     pub memory_record: Account<'info, MemoryRecord>,
-    
+
     #[account(
         mut,
         seeds = [b"agent", agent_authority.agent_id.as_ref()],
-        bump = agent_authority.bump
+        bump = agent_authority.bump,
+        constraint = agent_authority.pubkey == agent_signer.key()
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
+    pub agent_signer: Signer<'info>,
+
     /// CHECK: Owner can be any account
     pub owner: UncheckedAccount<'info>,
-    
+
     #[account(mut)]
     pub payer: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -593,7 +668,7 @@ pub struct AddClaim<'info> {
         bump = memory_record.bump
     )]
     pub memory_record: Account<'info, MemoryRecord>,
-    
+
     #[account(
         init,
         payer = payer,
@@ -602,16 +677,20 @@ pub struct AddClaim<'info> {
         bump
     )]
     pub claim_account: Account<'info, ClaimAccount>,
-    
+
     #[account(
+        mut,
         seeds = [b"agent", agent_authority.agent_id.as_ref()],
-        bump = agent_authority.bump
+        bump = agent_authority.bump,
+        constraint = agent_authority.pubkey == claimant.key()
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
+    pub claimant: Signer<'info>,
+
     #[account(mut)]
     pub payer: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -623,14 +702,14 @@ pub struct PromoteMemory<'info> {
         bump = memory_record.bump
     )]
     pub memory_record: Account<'info, MemoryRecord>,
-    
+
     #[account(
         seeds = [b"agent", agent_authority.agent_id.as_ref()],
         bump = agent_authority.bump,
         constraint = agent_authority.pubkey == promoter.key()
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
     pub promoter: Signer<'info>,
 }
 
@@ -642,36 +721,52 @@ pub struct RetractClaim<'info> {
         bump = claim_account.bump
     )]
     pub claim_account: Account<'info, ClaimAccount>,
-    
+
     #[account(
         seeds = [b"agent", agent_authority.agent_id.as_ref()],
         bump = agent_authority.bump,
         constraint = agent_authority.pubkey == retractor.key()
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
     pub retractor: Signer<'info>,
 }
 
 #[derive(Accounts)]
 pub struct SupersedeClaim<'info> {
+    #[account(
+        seeds = [b"memory", memory_record.owner.as_ref(), memory_record.memory_id.as_ref()],
+        bump = memory_record.bump
+    )]
     pub memory_record: Account<'info, MemoryRecord>,
-    
-    #[account(mut)]
+
+    #[account(
+        mut,
+        constraint = old_claim.memory_id == memory_record.memory_id
+    )]
     pub old_claim: Account<'info, ClaimAccount>,
-    
+
+    #[account(
+        seeds = [b"agent", agent_authority.agent_id.as_ref()],
+        bump = agent_authority.bump,
+        constraint = agent_authority.pubkey == superseder.key()
+    )]
+    pub agent_authority: Account<'info, AgentAuthority>,
+
     #[account(
         init,
         payer = payer,
         space = ClaimAccount::SIZE,
-        seeds = [b"claim", memory_record.memory_id.as_ref(), &(old_claim.claim_index + 1000).to_le_bytes()],
+        seeds = [b"claim", memory_record.memory_id.as_ref(), &(old_claim.claim_index + CLAIM_SUPERSEDE_OFFSET).to_le_bytes()],
         bump
     )]
     pub new_claim: Account<'info, ClaimAccount>,
-    
+
+    pub superseder: Signer<'info>,
+
     #[account(mut)]
     pub payer: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -683,7 +778,7 @@ pub struct AttestMerkleRoot<'info> {
         bump = registry.bump
     )]
     pub registry: Account<'info, MemoryRegistry>,
-    
+
     #[account(
         init,
         payer = attester,
@@ -692,10 +787,10 @@ pub struct AttestMerkleRoot<'info> {
         bump
     )]
     pub attestation: Account<'info, MerkleAttestation>,
-    
+
     #[account(mut)]
     pub attester: Signer<'info>,
-    
+
     pub system_program: Program<'info, System>,
 }
 
@@ -706,14 +801,14 @@ pub struct UpdateTrustScore<'info> {
         bump = registry.bump
     )]
     pub registry: Account<'info, MemoryRegistry>,
-    
+
     #[account(
         mut,
         seeds = [b"agent", agent_authority.agent_id.as_ref()],
         bump = agent_authority.bump
     )]
     pub agent_authority: Account<'info, AgentAuthority>,
-    
+
     pub caller: Signer<'info>,
 }
 
@@ -739,6 +834,8 @@ pub struct AgentRegistered {
     pub agent_id: [u8; 16],
     pub pubkey: Pubkey,
     pub role: AgentRole,
+    pub repo_url: String,
+    pub registry_reference_url: String,
 }
 
 #[event]
@@ -810,33 +907,54 @@ pub struct MemoryVerified {
 pub enum MemoryError {
     #[msg("Only episodic memories can be written directly")]
     OnlyEpisodicAllowed,
-    
+
     #[msg("Too many tags (max 10)")]
     TooManyTags,
-    
+
     #[msg("Confidence must be 0-10000 basis points")]
     InvalidConfidence,
-    
+
+    #[msg("TTL must be a positive number of seconds")]
+    InvalidTtl,
+
     #[msg("Insufficient permissions for this operation")]
     InsufficientPermissions,
-    
+
     #[msg("Memory is already promoted to semantic")]
     AlreadyPromoted,
-    
+
     #[msg("Claim is already retracted")]
     AlreadyRetracted,
-    
+
+    #[msg("Claim has already been superseded")]
+    AlreadySuperseded,
+
     #[msg("Empty Merkle input")]
     EmptyMerkleInput,
-    
+
     #[msg("Too many Merkle leaves (max 256)")]
     TooManyMerkleLeaves,
-    
+
     #[msg("Unauthorized caller")]
     UnauthorizedCaller,
-    
+
+    #[msg("Counter overflow")]
+    CounterOverflow,
+
     #[msg("Memory has expired")]
     MemoryExpired,
+
+    #[msg("Maximum claims reached for memory")]
+    MaxClaimsExceeded,
+
+    #[msg("Agent repository URL is invalid")]
+    InvalidAgentRepoUrl,
+
+    #[msg("Agent repository URL exceeds max length")]
+    RepoUrlTooLong,
+
+    #[msg("Missing required registry repository link")]
+    MissingRegistryRepoLink,
 }
 
 // ================================================================================
@@ -845,10 +963,17 @@ pub enum MemoryError {
 
 pub const MAX_TAGS: usize = 10;
 pub const MAX_MERKLE_LEAVES: usize = 256;
+pub const MAX_REPO_URL_LENGTH: usize = 200;
+pub const CLAIM_SUPERSEDE_OFFSET: u32 = 1000;
+pub const REGISTRY_REPO_URL: &str = "https://github.com/cwalinapj/org-memory-registry";
 
 // ================================================================================
 // HELPERS
 // ================================================================================
+
+fn is_registry_repo_link(url: &str) -> bool {
+    url.trim().trim_end_matches('/') == REGISTRY_REPO_URL
+}
 
 /// Compute Merkle root from a list of hashes
 fn compute_merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
@@ -863,7 +988,7 @@ fn compute_merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
 
     while current_level.len() > 1 {
         let mut next_level = Vec::new();
-        
+
         for chunk in current_level.chunks(2) {
             let combined = if chunk.len() == 2 {
                 let mut data = Vec::with_capacity(64);
@@ -876,7 +1001,7 @@ fn compute_merkle_root(hashes: &[[u8; 32]]) -> [u8; 32] {
             };
             next_level.push(combined);
         }
-        
+
         current_level = next_level;
     }
 

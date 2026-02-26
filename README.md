@@ -35,6 +35,18 @@ anchor build
 anchor deploy --provider.cluster devnet
 ```
 
+
+## Surfpool Mainnet Emulation
+
+Use local Surfpool for mainnet-like Anchor deploy/verify loops:
+
+```bash
+bash scripts/surfpool_plan.sh
+DRY_RUN=1 bash scripts/surfpool_emulate_mainnet.sh
+```
+
+See `docs/SURFPOOL_MAINNET_EMULATION.md` for full instructions.
+
 ## SDK
 ```bash
 cd sdk && npm install && npm run build

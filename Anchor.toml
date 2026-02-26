@@ -17,3 +17,6 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+[programs.localnet]
+org_memory_registry = "memRYfSiJ4TgVZMbN3BpZvmHEp7kVLoaLPEJzjdFVWL"

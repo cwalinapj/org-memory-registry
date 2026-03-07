@@ -5,6 +5,7 @@ This repo supports local Surfpool-based mainnet emulation for Anchor deploy/veri
 ## Quick Start
 
 ```bash
+cd /path/to/repository # replace with your clone path; repository root contains scripts/
 bash scripts/surfpool_plan.sh
 DRY_RUN=1 bash scripts/surfpool_emulate_mainnet.sh
 ```

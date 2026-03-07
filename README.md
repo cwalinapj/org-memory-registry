@@ -49,7 +49,7 @@ See `docs/SURFPOOL_MAINNET_EMULATION.md` for full instructions.
 
 ## SDK
 ```bash
-cd sdk && npm install && npm run build
+cd /path/to/org-memory-registry/sdk && npm install && npm run build
 ```
 
 ## License

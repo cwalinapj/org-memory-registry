@@ -41,6 +41,7 @@ anchor deploy --provider.cluster devnet
 Use local Surfpool for mainnet-like Anchor deploy/verify loops:
 
 ```bash
+cd /path/to/org-memory-registry
 bash scripts/surfpool_plan.sh
 DRY_RUN=1 bash scripts/surfpool_emulate_mainnet.sh
 ```
